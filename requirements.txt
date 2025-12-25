@@ -1,0 +1,6 @@
+opencv-python
+face-recognition
+face-recognition-models
+dlib
+numpy
+pickle-mixin
