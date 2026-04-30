@@ -1,5 +1,7 @@
 venv/
 __pycache__/
 *.pyc
-encodings.pkl
 .env
+encodings.pkl
+output/
+logs/

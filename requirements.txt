@@ -1,6 +1,8 @@
-opencv-python
-face-recognition
-face-recognition-models
-dlib
+fastapi
+uvicorn
 numpy
-pickle-mixin
+opencv-python
+face_recognition
+python-multipart
+python-dotenv
+requests
