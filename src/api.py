@@ -137,7 +137,8 @@ async def recognize(file: UploadFile = File(...)):
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
     try:
-        result = DeepFace.represent(rgb, model_name="VGG-Face")[0]["embedding"]
+        # result = DeepFace.represent(rgb, model_name="VGG-Face")[0]["embedding"]
+        DeepFace.represent(rgb, model_name="Facenet", enforce_detection=False)
     except:
         return {"status": "no_face", "name": "No face detected"}
 
