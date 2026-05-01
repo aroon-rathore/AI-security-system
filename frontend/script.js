@@ -1,35 +1,34 @@
-// =========================
-// CONFIG (LOCAL + DEPLOYMENT)
-// =========================
 const BASE_URL =
     window.location.hostname === "127.0.0.1" ||
     window.location.hostname === "localhost"
         ? "http://127.0.0.1:8000"
         : "https://ai-security-system-2.onrender.com"; 
-        // 👆 replace if your Render URL changes
+        // replace with your Render URL if needed
 
 // =========================
-// BUFFER SYSTEM
+// STATE CONTROL
 // =========================
 let faceBuffer = [];
+let isProcessing = false;
 
 // =========================
 // REGISTER FACE
 // =========================
 async function register() {
     const name = document.getElementById("name").value;
-    const file = document.getElementById("image").files[0];
     const email = document.getElementById("email").value;
+    const file = document.getElementById("image").files[0];
+    const status = document.getElementById("registerStatus");
 
-    if (!name || !file || !email) {
+    if (!name || !email || !file) {
         alert("Please fill all fields!");
         return;
     }
 
     const formData = new FormData();
     formData.append("name", name);
-    formData.append("file", file);
     formData.append("email", email);
+    formData.append("file", file);
 
     try {
         const res = await fetch(`${BASE_URL}/register/`, {
@@ -38,11 +37,17 @@ async function register() {
         });
 
         const data = await res.json();
-        alert("✅ " + (data.message || "Registered successfully"));
+
+        if (data.status === "success") {
+            status.innerText = "✅ " + data.message;
+            alert(data.message);
+        } else {
+            status.innerText = "❌ Registration failed";
+        }
 
     } catch (err) {
         console.error(err);
-        alert("❌ Server not reachable!");
+        alert("❌ Server error during registration");
     }
 }
 
@@ -59,14 +64,14 @@ async function startCamera() {
         });
 
         video.srcObject = stream;
-        status.innerText = "📷 Camera started";
+        status.innerText = "📷 Camera running";
 
-        // send frames continuously
+        // IMPORTANT: prevent multiple intervals
         setInterval(sendFrame, 1200);
 
     } catch (err) {
         console.error(err);
-        alert("❌ Camera access denied!");
+        alert("Camera access denied!");
     }
 }
 
@@ -74,15 +79,23 @@ async function startCamera() {
 // SEND FRAME TO BACKEND
 // =========================
 async function sendFrame() {
+
+    if (isProcessing) return;
+    isProcessing = true;
+
     const video = document.getElementById("video");
     const canvas = document.getElementById("canvas");
     const ctx = canvas.getContext("2d");
     const faceResult = document.getElementById("faceResult");
 
-    if (!video.videoWidth) return;
+    if (!video.videoWidth) {
+        isProcessing = false;
+        return;
+    }
 
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
+
     ctx.drawImage(video, 0, 0);
 
     canvas.toBlob(async (blob) => {
@@ -99,37 +112,53 @@ async function sendFrame() {
             const data = await res.json();
 
             // =========================
-            // SAFE BACKEND RESPONSE
+            // HANDLE ERRORS
             // =========================
-            const face = data?.faces?.[0];
-
-            // CASE 1: No face detected
-            if (!face || face === "No face detected") {
-                faceResult.innerText = "❌ No face detected";
+            if (!data || !data.status) {
+                faceResult.innerText = "⚠️ Server error";
+                isProcessing = false;
                 return;
             }
 
-            // CASE 2: Unknown person (INTRUDER)
-            if (face === "Unknown") {
+            // =========================
+            // NO FACE DETECTED
+            // =========================
+            if (data.status === "no_face") {
+                faceResult.innerText = "❌ No face detected";
+                isProcessing = false;
+                return;
+            }
+
+            // =========================
+            // GET NAME
+            // =========================
+            const name = data.faces?.[0];
+
+            if (!name) {
+                faceResult.innerText = "⚠️ Processing...";
+                isProcessing = false;
+                return;
+            }
+
+            // =========================
+            // DISPLAY RESULT
+            // =========================
+            if (name === "Unknown") {
                 faceResult.innerText = "🚨 Intruder Detected";
-                triggerAlert();
-            }
-
-            // CASE 3: Known person
-            else {
-                faceResult.innerText = `🧑 ${face}`;
+            } else {
+                faceResult.innerText = "🧑 " + name;
             }
 
             // =========================
-            // BUFFER LOGIC (STABLE)
+            // BUFFER SYSTEM (for alert)
             // =========================
-            faceBuffer.push(face);
+            faceBuffer.push(name);
 
             if (faceBuffer.length > 5) {
                 faceBuffer.shift();
             }
 
-            const unknownCount = faceBuffer.filter(f => f === "Unknown").length;
+            const unknownCount = faceBuffer.filter(n => n === "Unknown").length;
 
             if (unknownCount >= 3) {
                 triggerAlert();
@@ -138,14 +167,16 @@ async function sendFrame() {
 
         } catch (err) {
             console.error("API Error:", err);
-            faceResult.innerText = "⚠️ Server error";
+            faceResult.innerText = "⚠️ Connection error";
         }
+
+        isProcessing = false;
 
     }, "image/jpeg");
 }
 
 // =========================
-// ALERT SYSTEM
+// ALERT SOUND
 // =========================
 function triggerAlert() {
     const audio = new Audio("alarm.mp3");

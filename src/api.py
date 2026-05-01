@@ -4,7 +4,19 @@ import numpy as np
 import cv2
 import pickle
 import os
+import smtplib
+import time
 from datetime import datetime
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
+from dotenv import load_dotenv
+
+# =========================
+# LOAD ENV
+# =========================
+load_dotenv()
 
 app = FastAPI()
 
@@ -29,125 +41,183 @@ INTRUDER_DIR = os.path.join(BASE_DIR, "output", "intruders")
 os.makedirs(INTRUDER_DIR, exist_ok=True)
 
 # =========================
-# SAFE DB LOADER (IMPORTANT FIX)
+# EMAIL SETTINGS
 # =========================
-def load_db():
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "rb") as f:
-                return pickle.load(f)
-        except Exception as e:
-            print("DB LOAD ERROR:", e)
-            return []
-    return []
+last_email_time = 0
+EMAIL_COOLDOWN = 30
+
 
 # =========================
-# FEATURE EXTRACTION
+# FEATURE EXTRACTION (SIMPLE AI)
 # =========================
 def extract_features(image):
-    try:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        resized = cv2.resize(gray, (100, 100))
-        return resized.flatten()
-    except Exception as e:
-        print("FEATURE ERROR:", e)
-        return None
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    resized = cv2.resize(gray, (100, 100))
+    return resized.flatten()
+
 
 # =========================
-# REGISTER
+# EMAIL FUNCTION
+# =========================
+def send_email_alert(receiver_email, image_path):
+
+    sender = os.getenv("EMAIL_SENDER")
+    password = os.getenv("EMAIL_PASSWORD")
+
+    if not sender or not password:
+        print("❌ Email credentials missing")
+        return
+
+    msg = MIMEMultipart()
+    msg["Subject"] = "🚨 Intruder Alert"
+    msg["From"] = sender
+    msg["To"] = receiver_email
+
+    msg.attach(MIMEText("Intruder detected in your AI security system."))
+
+    try:
+        with open(image_path, "rb") as f:
+            part = MIMEBase("application", "octet-stream")
+            part.set_payload(f.read())
+
+        encoders.encode_base64(part)
+        part.add_header(
+            "Content-Disposition",
+            f"attachment; filename={os.path.basename(image_path)}"
+        )
+        msg.attach(part)
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(sender, password)
+            server.sendmail(sender, receiver_email, msg.as_string())
+
+        print("✅ Email sent successfully")
+
+    except Exception as e:
+        print("❌ Email error:", e)
+
+
+# =========================
+# REGISTER FACE
 # =========================
 @app.post("/register/")
-async def register(name: str = Form(...), email: str = Form(...), file: UploadFile = File(...)):
+async def register(
+    name: str = Form(...),
+    email: str = Form(...),
+    file: UploadFile = File(...)
+):
 
-    try:
-        img = await file.read()
+    img = await file.read()
+    nparr = np.frombuffer(img, np.uint8)
+    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        if not img:
-            return {"message": "Invalid image"}
+    if image is None:
+        return {"status": "error", "message": "Invalid image"}
 
-        nparr = np.frombuffer(img, np.uint8)
-        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    features = extract_features(image)
 
-        if image is None:
-            return {"message": "Invalid image"}
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "rb") as f:
+            db = pickle.load(f)
+    else:
+        db = []
 
-        features = extract_features(image)
+    db.append({
+        "name": name,
+        "email": email,
+        "features": features
+    })
 
-        if features is None:
-            return {"message": "Feature extraction failed"}
+    with open(DB_FILE, "wb") as f:
+        pickle.dump(db, f)
 
-        db = load_db()
+    return {
+        "status": "success",
+        "message": f"{name} registered successfully"
+    }
 
-        db.append({
-            "name": name,
-            "email": email,
-            "features": features
-        })
-
-        with open(DB_FILE, "wb") as f:
-            pickle.dump(db, f)
-
-        return {"message": f"{name} registered successfully"}
-
-    except Exception as e:
-        print("REGISTER ERROR:", e)
-        return {"message": "Server error"}
 
 # =========================
-# RECOGNIZE
+# RECOGNIZE FACE
 # =========================
 @app.post("/recognize/")
 async def recognize(file: UploadFile = File(...)):
 
-    try:
-        db = load_db()
+    global last_email_time
 
-        img = await file.read()
+    # Load DB
+    if not os.path.exists(DB_FILE):
+        return {"status": "no_db", "faces": ["No database"]}
 
-        if not img:
-            return {"faces": ["No face detected"]}
+    with open(DB_FILE, "rb") as f:
+        db = pickle.load(f)
 
-        nparr = np.frombuffer(img, np.uint8)
-        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    # Read image
+    img = await file.read()
+    nparr = np.frombuffer(img, np.uint8)
+    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        if image is None:
-            return {"faces": ["Invalid image"]}
+    if image is None:
+        return {"status": "error", "faces": ["Invalid image"]}
 
-        features = extract_features(image)
+    features = extract_features(image)
 
-        if features is None:
-            return {"faces": ["No face detected"]}
+    # =========================
+    # MATCHING LOGIC
+    # =========================
+    def distance(a, b):
+        return np.linalg.norm(a - b)
 
-        def similarity(a, b):
-            return np.linalg.norm(a - np.array(b))
+    best_name = "Unknown"
+    best_score = float("inf")
 
-        best_match = "Unknown"
-        best_score = 999999
+    for person in db:
+        score = distance(features, person["features"])
+        if score < best_score:
+            best_score = score
+            best_name = person["name"]
+            best_email = person["email"]
 
-        # If DB empty
-        if len(db) == 0:
-            return {"faces": ["No database"]}
+    # =========================
+    # THRESHOLD CHECK
+    # =========================
+    THRESHOLD = 5000
 
-        for person in db:
-            try:
-                score = similarity(features, person["features"])
+    unknown_detected = False
 
-                if score < best_score:
-                    best_score = score
-                    best_match = person["name"]
-            except Exception as e:
-                print("MATCH ERROR:", e)
+    if best_score > THRESHOLD:
+        best_name = "Unknown"
+        unknown_detected = True
 
-        # THRESHOLD (tune this if needed)
-        if best_score > 5000:
-            best_match = "Unknown"
+        # Save intruder image
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        path = os.path.join(INTRUDER_DIR, f"intruder_{ts}.jpg")
+        cv2.imwrite(path, image)
 
-            ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            path = os.path.join(INTRUDER_DIR, f"intruder_{ts}.jpg")
-            cv2.imwrite(path, image)
+        # EMAIL (COOLDOWN PROTECTED)
+        current_time = time.time()
 
-        return {"faces": [best_match]}
+        if current_time - last_email_time > EMAIL_COOLDOWN:
+            admin_email = os.getenv("ADMIN_EMAIL")
 
-    except Exception as e:
-        print("RECOGNIZE ERROR:", e)
-        return {"faces": ["Server error"]}
+            if admin_email:
+                send_email_alert(admin_email, path)
+
+            last_email_time = current_time
+
+    # =========================
+    # NO FACE CHECK (BASIC)
+    # =========================
+    if len(features) == 0:
+        return {
+            "status": "no_face",
+            "faces": []
+        }
+
+    # =========================
+    # FINAL RESPONSE (IMPORTANT)
+    # =========================
+    return {
+        "status": "ok",
+        "faces": [best_name]
+    }
