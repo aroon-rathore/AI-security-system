@@ -5,21 +5,29 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Security System</title>
 
-    <!-- Link CSS -->
     <link rel="stylesheet" href="style.css">
 </head>
+
 <body>
 
     <h1>🔐 AI-Based Security System</h1>
 
     <!-- ========================= -->
-    <!-- REGISTER SECTION -->
+    <!-- SYSTEM STATUS -->
+    <!-- ========================= -->
+    <div class="card">
+        <h3>System Status</h3>
+        <p id="debug">Initializing...</p>
+    </div>
+
+    <!-- ========================= -->
+    <!-- REGISTER -->
     <!-- ========================= -->
     <div class="card">
         <h2>Register Face</h2>
 
-        <input type="text" id="name" placeholder="Enter name" required>
-        <input type="email" id="email" placeholder="Enter email" required>
+        <input type="text" id="name" placeholder="Enter name">
+        <input type="email" id="email" placeholder="Enter email">
         <input type="file" id="image" accept="image/*">
 
         <button onclick="register()">Register</button>
@@ -28,7 +36,7 @@
     </div>
 
     <!-- ========================= -->
-    <!-- CAMERA SECTION -->
+    <!-- CAMERA -->
     <!-- ========================= -->
     <div class="card">
         <h2>Live Camera</h2>
@@ -38,7 +46,8 @@
         <video id="video" autoplay playsinline></video>
         <canvas id="canvas" style="display:none;"></canvas>
 
-        <p id="status"></p>
+        <p id="status">Camera inactive</p>
+        <h3 id="faceResult">Waiting...</h3>
     </div>
 
     <!-- ========================= -->

@@ -1,10 +1,22 @@
+ // =========================
+// CONFIG (DEPLOYMENT READY)
 // =========================
-// FRONTEND FACE BUFFER (FIX FALSE ALERTS)
+
+// Auto-switch between local and production
+const BASE_URL =
+    window.location.hostname === "127.0.0.1" ||
+    window.location.hostname === "localhost"
+        ? "http://127.0.0.1:8000"
+        : "https://YOUR-DEPLOYED-BACKEND-URL"; 
+        // 👆 replace after deployment (Hugging Face / Render link)
+
+// =========================
+// BUFFER SYSTEM
 // =========================
 let faceBuffer = [];
 
 // =========================
-// REGISTER FUNCTION
+// REGISTER FACE
 // =========================
 async function register() {
     const name = document.getElementById("name").value;
@@ -23,40 +35,48 @@ async function register() {
     formData.append("email", email);
 
     try {
-        const res = await fetch("https://your-app-name.onrender.com/register/", {
+        const res = await fetch(`${BASE_URL}/register/`, {
             method: "POST",
             body: formData
         });
 
         const data = await res.json();
 
-        status.innerText = data.message;
-        alert(data.message);
+        if (!res.ok) {
+            throw new Error(data.message || "Registration failed");
+        }
 
-    } catch (error) {
-        console.error("Register Error:", error);
-        alert("Registration failed!");
+        status.innerText = data.message;
+        alert("✅ " + data.message);
+
+    } catch (err) {
+        console.error(err);
+        alert("❌ Server not reachable!");
     }
 }
 
 // =========================
-// START CAMERA
+// START CAMERA (USER DEVICE)
 // =========================
 async function startCamera() {
     const video = document.getElementById("video");
     const status = document.getElementById("status");
 
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: true
+        });
+
         video.srcObject = stream;
 
-        status.innerText = "Camera started...";
+        status.innerText = "📷 Camera active";
 
+        // send frames every 1 second
         setInterval(sendFrame, 1000);
 
-    } catch (error) {
-        console.error("Camera Error:", error);
-        alert("Camera access denied!");
+    } catch (err) {
+        console.error(err);
+        alert("❌ Camera access denied!");
     }
 }
 
@@ -81,55 +101,53 @@ async function sendFrame() {
         formData.append("file", blob, "frame.jpg");
 
         try {
-            const res = await fetch("https://your-app-name.onrender.com/recognize/", {
+            const res = await fetch(`${BASE_URL}/recognize/`, {
                 method: "POST",
                 body: formData
             });
 
             const data = await res.json();
-            console.log(data);
 
-            let faces = data.faces || [];
+            const faceResult = document.getElementById("faceResult");
 
-            // =========================
-            // BUFFER LOGIC (FIX FALSE ALERTS)
-            // =========================
-            faceBuffer.push(faces);
+            if (data.status === "no_face") {
+                faceResult.innerText = "❌ No face detected";
+                return;
+            }
 
-            // keep last 5 frames
+            const names = data.name || [];
+
+            if (Array.isArray(names)) {
+                faceResult.innerText = `🧑 ${names[0]}`;
+
+                // BUFFER LOGIC
+                faceBuffer.push(names[0]);
+
+            } else {
+                faceResult.innerText = `🧑 ${names}`;
+                faceBuffer.push(names);
+            }
+
             if (faceBuffer.length > 5) {
                 faceBuffer.shift();
             }
 
-            // flatten buffer
-            let allFaces = faceBuffer.flat();
+            const unknownCount = faceBuffer.filter(n => n === "Unknown").length;
 
-            let unknownCount = allFaces.filter(f => f === "Unknown").length;
-
-            // =========================
-            // STABLE ALERT SYSTEM
-            // =========================
             if (unknownCount >= 3) {
                 triggerAlert();
-                faceBuffer = []; // reset after alert
+                faceBuffer = [];
             }
 
-            // =========================
-            // LOGIC FOR NO FACE
-            // =========================
-            if (faces.includes("No face detected")) {
-                console.log("No face detected");
-            }
-
-        } catch (error) {
-            console.error("API Error:", error);
+        } catch (err) {
+            console.error("API Error:", err);
         }
 
     }, "image/jpeg");
 }
 
 // =========================
-// SOUND ALERT
+// ALERT SYSTEM
 // =========================
 function triggerAlert() {
     const audio = new Audio("alarm.mp3");

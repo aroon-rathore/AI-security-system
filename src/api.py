@@ -7,18 +7,22 @@ import os
 import cv2
 import smtplib
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 import time
 from dotenv import load_dotenv
+from datetime import datetime
 
 # =========================
-# LOAD ENV VARIABLES
+# LOAD ENV
 # =========================
 load_dotenv()
 
 app = FastAPI()
 
 # =========================
-# CORS (Frontend Support)
+# CORS
 # =========================
 app.add_middleware(
     CORSMiddleware,
@@ -33,33 +37,55 @@ app.add_middleware(
 # =========================
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ENCODINGS_FILE = os.path.join(BASE_DIR, "encodings.pkl")
+LOG_FILE = os.path.join(BASE_DIR, "logs", "security_log.txt")
+INTRUDER_DIR = os.path.join(BASE_DIR, "output", "intruders")
+
+os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+os.makedirs(INTRUDER_DIR, exist_ok=True)
 
 # =========================
-# EMAIL COOLDOWN
+# EMAIL CONTROL
 # =========================
 last_email_time = 0
-EMAIL_COOLDOWN = 30  # seconds
+EMAIL_COOLDOWN = 30
 
 # =========================
 # EMAIL FUNCTION
 # =========================
-def send_email_alert(receiver_email):
+def send_email_alert(receiver_email, image_path):
     sender = os.getenv("EMAIL_SENDER")
     password = os.getenv("EMAIL_PASSWORD")
 
     if not sender or not password:
-        print("Email credentials missing in .env")
+        print("Missing email credentials")
         return
 
-    msg = MIMEText("🚨 Intruder detected!")
-    msg["Subject"] = "Security Alert"
+    msg = MIMEMultipart()
+    msg["Subject"] = "🚨 Intruder Alert!"
     msg["From"] = sender
     msg["To"] = receiver_email
 
+    msg.attach(MIMEText("⚠️ Intruder detected! See attached image."))
+
     try:
+        with open(image_path, "rb") as f:
+            part = MIMEBase("application", "octet-stream")
+            part.set_payload(f.read())
+
+        encoders.encode_base64(part)
+        part.add_header(
+            "Content-Disposition",
+            f"attachment; filename={os.path.basename(image_path)}"
+        )
+
+        msg.attach(part)
+
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(sender, password)
             server.sendmail(sender, receiver_email, msg.as_string())
+
+        print("✅ Email sent!")
+
     except Exception as e:
         print("Email Error:", e)
 
@@ -74,37 +100,39 @@ async def register_face(
 ):
     contents = await file.read()
 
-    nparr = np.frombuffer(contents, np.uint8)
-    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    image = cv2.imdecode(np.frombuffer(contents, np.uint8), cv2.IMREAD_COLOR)
 
     if image is None:
-        return {"message": "Invalid image"}
+        return {"status": "error", "message": "Invalid image"}
 
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    encodings = face_recognition.face_encodings(rgb)
 
-    encodings = face_recognition.face_encodings(image)
+    if not encodings:
+        return {"status": "error", "message": "No face detected"}
 
-    if len(encodings) == 0:
-        return {"message": "No face detected"}
+    encoding = encodings[0]
 
-    new_encoding = encodings[0]
-
-    # Load existing data safely
     if os.path.exists(ENCODINGS_FILE):
-        with open(ENCODINGS_FILE, "rb") as f:
-            known_encodings, known_names, known_emails = pickle.load(f)
+        try:
+            with open(ENCODINGS_FILE, "rb") as f:
+                known_encodings, known_names, known_emails = pickle.load(f)
+        except:
+            known_encodings, known_names, known_emails = [], [], []
     else:
         known_encodings, known_names, known_emails = [], [], []
 
-    # Save new user
-    known_encodings.append(new_encoding)
+    known_encodings.append(encoding)
     known_names.append(name)
     known_emails.append(email)
 
     with open(ENCODINGS_FILE, "wb") as f:
         pickle.dump((known_encodings, known_names, known_emails), f)
 
-    return {"message": f"{name} registered successfully"}
+    return {
+        "status": "success",
+        "message": f"{name} registered successfully"
+    }
 
 # =========================
 # RECOGNIZE FACE
@@ -114,63 +142,72 @@ async def recognize_face(file: UploadFile = File(...)):
     global last_email_time
 
     if not os.path.exists(ENCODINGS_FILE):
-        return {"faces": []}
+        return {"status": "error", "name": "No database"}
 
     with open(ENCODINGS_FILE, "rb") as f:
         known_encodings, known_names, known_emails = pickle.load(f)
 
-    contents = await file.read()
-
-    nparr = np.frombuffer(contents, np.uint8)
-    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    image = cv2.imdecode(np.frombuffer(await file.read(), np.uint8), cv2.IMREAD_COLOR)
 
     if image is None:
-        return {"faces": ["Invalid image"]}
+        return {"status": "error", "name": "Invalid image"}
 
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-    face_locations = face_recognition.face_locations(image)
-    face_encodings = face_recognition.face_encodings(image, face_locations)
+    locations = face_recognition.face_locations(rgb)
+    encodings = face_recognition.face_encodings(rgb, locations)
 
-    if len(face_encodings) == 0:
-        return {"faces": ["No face detected"]}
+    if not encodings:
+        return {"status": "no_face", "name": "No face detected"}
 
-    face_names = []
+    results = []
     unknown_detected = False
 
-    for face_encoding in face_encodings:
+    for face_encoding in encodings:
 
-        # No registered faces
         if len(known_encodings) == 0:
-            face_names.append("Unknown")
+            results.append("Unknown")
             unknown_detected = True
             continue
 
         distances = face_recognition.face_distance(known_encodings, face_encoding)
 
-        best_index = np.argmin(distances)
-        best_distance = distances[best_index]
+        if len(distances) == 0:
+            results.append("Unknown")
+            unknown_detected = True
+            continue
 
-        THRESHOLD = 0.45
+        idx = np.argmin(distances)
 
-        if best_distance < THRESHOLD:
-            name = known_names[best_index]
+        if distances[idx] < 0.45:
+            results.append(known_names[idx])
         else:
-            name = "Unknown"
+            results.append("Unknown")
             unknown_detected = True
 
-        face_names.append(name)
-
     # =========================
-    # EMAIL ALERT (SAFE + CONTROLLED)
+    # INTRUDER HANDLING
     # =========================
     if unknown_detected:
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        path = os.path.join(INTRUDER_DIR, f"intruder_{timestamp}.jpg")
+
+        cv2.imwrite(path, image)
+
+        try:
+            with open(LOG_FILE, "a") as f:
+                f.write(f"[{timestamp}] Intruder detected\n")
+        except:
+            pass
+
         current_time = time.time()
 
         if current_time - last_email_time > EMAIL_COOLDOWN:
-            if len(known_emails) > 0:
-                send_email_alert(known_emails[0])
-
+            if known_emails:
+                send_email_alert(known_emails[0], path)
             last_email_time = current_time
 
-    return {"faces": face_names}
+    return {
+        "status": "success",
+        "name": results
+    }
