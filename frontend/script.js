@@ -1,14 +1,12 @@
- // =========================
-// CONFIG (DEPLOYMENT READY)
 // =========================
-
-// Auto-switch between local and production
+// CONFIG (LOCAL + DEPLOYMENT)
+// =========================
 const BASE_URL =
     window.location.hostname === "127.0.0.1" ||
     window.location.hostname === "localhost"
         ? "http://127.0.0.1:8000"
-        : "https://YOUR-DEPLOYED-BACKEND-URL"; 
-        // 👆 replace after deployment (Hugging Face / Render link)
+        : "https://ai-security-system-2.onrender.com"; 
+        // 👆 replace if your Render URL changes
 
 // =========================
 // BUFFER SYSTEM
@@ -22,7 +20,6 @@ async function register() {
     const name = document.getElementById("name").value;
     const file = document.getElementById("image").files[0];
     const email = document.getElementById("email").value;
-    const status = document.getElementById("registerStatus");
 
     if (!name || !file || !email) {
         alert("Please fill all fields!");
@@ -41,13 +38,7 @@ async function register() {
         });
 
         const data = await res.json();
-
-        if (!res.ok) {
-            throw new Error(data.message || "Registration failed");
-        }
-
-        status.innerText = data.message;
-        alert("✅ " + data.message);
+        alert("✅ " + (data.message || "Registered successfully"));
 
     } catch (err) {
         console.error(err);
@@ -56,7 +47,7 @@ async function register() {
 }
 
 // =========================
-// START CAMERA (USER DEVICE)
+// START CAMERA
 // =========================
 async function startCamera() {
     const video = document.getElementById("video");
@@ -68,11 +59,10 @@ async function startCamera() {
         });
 
         video.srcObject = stream;
+        status.innerText = "📷 Camera started";
 
-        status.innerText = "📷 Camera active";
-
-        // send frames every 1 second
-        setInterval(sendFrame, 1000);
+        // send frames continuously
+        setInterval(sendFrame, 1200);
 
     } catch (err) {
         console.error(err);
@@ -87,12 +77,12 @@ async function sendFrame() {
     const video = document.getElementById("video");
     const canvas = document.getElementById("canvas");
     const ctx = canvas.getContext("2d");
+    const faceResult = document.getElementById("faceResult");
 
     if (!video.videoWidth) return;
 
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
-
     ctx.drawImage(video, 0, 0);
 
     canvas.toBlob(async (blob) => {
@@ -108,31 +98,38 @@ async function sendFrame() {
 
             const data = await res.json();
 
-            const faceResult = document.getElementById("faceResult");
+            // =========================
+            // SAFE BACKEND RESPONSE
+            // =========================
+            const face = data?.faces?.[0];
 
-            if (data.status === "no_face") {
+            // CASE 1: No face detected
+            if (!face || face === "No face detected") {
                 faceResult.innerText = "❌ No face detected";
                 return;
             }
 
-            const names = data.name || [];
-
-            if (Array.isArray(names)) {
-                faceResult.innerText = `🧑 ${names[0]}`;
-
-                // BUFFER LOGIC
-                faceBuffer.push(names[0]);
-
-            } else {
-                faceResult.innerText = `🧑 ${names}`;
-                faceBuffer.push(names);
+            // CASE 2: Unknown person (INTRUDER)
+            if (face === "Unknown") {
+                faceResult.innerText = "🚨 Intruder Detected";
+                triggerAlert();
             }
+
+            // CASE 3: Known person
+            else {
+                faceResult.innerText = `🧑 ${face}`;
+            }
+
+            // =========================
+            // BUFFER LOGIC (STABLE)
+            // =========================
+            faceBuffer.push(face);
 
             if (faceBuffer.length > 5) {
                 faceBuffer.shift();
             }
 
-            const unknownCount = faceBuffer.filter(n => n === "Unknown").length;
+            const unknownCount = faceBuffer.filter(f => f === "Unknown").length;
 
             if (unknownCount >= 3) {
                 triggerAlert();
@@ -141,6 +138,7 @@ async function sendFrame() {
 
         } catch (err) {
             console.error("API Error:", err);
+            faceResult.innerText = "⚠️ Server error";
         }
 
     }, "image/jpeg");
