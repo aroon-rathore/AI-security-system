@@ -1,8 +1,8 @@
 fastapi
 uvicorn
-opencv-python
+opencv-python-headless
 numpy
-deepface
+deepface==0.0.79
 python-multipart
 pillow
 python-dotenv
