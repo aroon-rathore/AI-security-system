@@ -1,27 +1,30 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-import numpy as np
-import cv2
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+import face_recognition
 import pickle
+import numpy as np
 import os
+import cv2
 import smtplib
-import time
-from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
+import time
 from dotenv import load_dotenv
-from deepface import DeepFace
-from typing import List, Dict
-import hashlib
-import tempfile
+from datetime import datetime
+import logging
+from pathlib import Path
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
 app = FastAPI()
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,284 +33,363 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Paths
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_FILE = os.path.join(BASE_DIR, "face_db.pkl")
-INTRUDER_DIR = os.path.join(BASE_DIR, "output", "intruders")
-os.makedirs(INTRUDER_DIR, exist_ok=True)
+BASE_DIR = Path(__file__).resolve().parent.parent
+ENCODINGS_FILE = BASE_DIR / "encodings.pkl"
+FRONTEND_DIR = BASE_DIR / "frontend"
+LOG_FILE = BASE_DIR / "logs" / "security_log.txt"
+INTRUDER_DIR = BASE_DIR / "output" / "intruders"
 
-# Settings
+# Create directories
+INTRUDER_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+# Get admin email from .env (only this email receives alerts)
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "")
+if not ADMIN_EMAIL:
+    logger.warning("⚠️ ADMIN_EMAIL not set in .env file! Alerts will not be sent.")
+
+# Serve static files
+if FRONTEND_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+    
+    @app.get("/")
+    async def root():
+        return FileResponse(str(FRONTEND_DIR / "index.html"))
+    
+    @app.get("/style.css")
+    async def serve_css():
+        return FileResponse(str(FRONTEND_DIR / "style.css"))
+    
+    @app.get("/script.js")
+    async def serve_js():
+        return FileResponse(str(FRONTEND_DIR / "script.js"))
+    
+    @app.get("/alarm.mp3")
+    async def serve_alarm():
+        return FileResponse(str(FRONTEND_DIR / "alarm.mp3"))
+
 last_email_time = 0
 EMAIL_COOLDOWN = 30
-THRESHOLD = 0.6  # For face matching (lower = stricter)
 
-def extract_face_embedding(image):
-    """Extract face embedding using DeepFace"""
-    try:
-        # Save image temporarily
-        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_file:
-            cv2.imwrite(tmp_file.name, image)
-            tmp_path = tmp_file.name
-        
-        # Extract face embedding
-        embedding = DeepFace.represent(
-            img_path=tmp_path,
-            model_name='Facenet',  # Good balance of accuracy and speed
-            enforce_detection=True,
-            detector_backend='opencv'
-        )
-        
-        # Clean up
-        os.unlink(tmp_path)
-        
-        if embedding and len(embedding) > 0:
-            return np.array(embedding[0]['embedding']), True
-        return None, False
-    except Exception as e:
-        print(f"Face extraction error: {e}")
-        return None, False
-
-def detect_faces(image):
-    """Detect faces using OpenCV cascade"""
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-    faces = face_cascade.detectMultiScale(gray, 1.3, 5)
-    return faces
-
-def send_email_alert(receiver_email: str, image_path: str):
-    """Send email alert with intruder image"""
+def send_intruder_alert(image_path, face_names):
+    """Send email alert to admin for intruder only"""
+    global last_email_time
+    
     sender = os.getenv("EMAIL_SENDER")
     password = os.getenv("EMAIL_PASSWORD")
     
     if not sender or not password:
-        print("❌ Email credentials missing")
+        logger.error("Missing email credentials in .env file")
         return False
     
-    msg = MIMEMultipart()
-    msg["Subject"] = f"🚨 Intruder Alert - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    msg["From"] = sender
-    msg["To"] = receiver_email
+    if not ADMIN_EMAIL:
+        logger.error("ADMIN_EMAIL not configured in .env file")
+        return False
     
-    body = f"""
-    🚨 ALERT: Intruder Detected!
+    # Check cooldown to prevent spam
+    current_time = time.time()
+    if current_time - last_email_time < EMAIL_COOLDOWN:
+        logger.info(f"Email cooldown active. Last email sent {current_time - last_email_time:.1f}s ago")
+        return False
     
-    Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-    
-    An unknown person has been detected by your AI Security System.
-    Please check the attached image immediately.
-    
-    System: AI Security System v2.0
-    """
-    msg.attach(MIMEText(body, "plain"))
+    # Clean password (remove spaces if any)
+    password = password.replace(" ", "")
     
     try:
-        with open(image_path, "rb") as f:
-            part = MIMEBase("application", "octet-stream")
-            part.set_payload(f.read())
+        msg = MIMEMultipart()
+        msg["Subject"] = f"🚨 INTRUDER ALERT! - Unknown Person Detected"
+        msg["From"] = sender
+        msg["To"] = ADMIN_EMAIL
         
-        encoders.encode_base64(part)
-        part.add_header(
-            "Content-Disposition",
-            f"attachment; filename={os.path.basename(image_path)}"
-        )
-        msg.attach(part)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
+        body = f"""
+╔══════════════════════════════════════════════════════════╗
+║              🚨 INTRUDER ALERT! 🚨                       ║
+╚══════════════════════════════════════════════════════════╝
+
+Time: {timestamp}
+Location: AI Security System
+
+⚠️ An UNKNOWN person has been detected!
+
+Detected Faces: {', '.join(face_names)}
+
+Action Required: Please check the attached image immediately.
+
+--
+AI Security System - Automatic Alert
+        """
+        
+        msg.attach(MIMEText(body, "plain"))
+        
+        # Attach the intruder image
+        if os.path.exists(image_path):
+            with open(image_path, "rb") as f:
+                part = MIMEBase("application", "octet-stream")
+                part.set_payload(f.read())
+                encoders.encode_base64(part)
+                part.add_header("Content-Disposition", f"attachment; filename={os.path.basename(image_path)}")
+                msg.attach(part)
+                logger.info(f"📎 Image attached: {os.path.basename(image_path)}")
+        
+        # Send email using Gmail SMTP
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(sender, password)
-            server.sendmail(sender, receiver_email, msg.as_string())
-        
-        print("✅ Email sent successfully")
-        return True
+            server.sendmail(sender, ADMIN_EMAIL, msg.as_string())
+            last_email_time = current_time
+            logger.info(f"✅ Intruder alert sent to admin: {ADMIN_EMAIL}")
+            return True
+            
     except Exception as e:
-        print(f"❌ Email error: {e}")
+        logger.error(f"Email error: {str(e)}")
         return False
 
 @app.post("/register/")
-async def register(
-    name: str = Form(...),
+async def register_face(
+    name: str = Form(...), 
     email: str = Form(...),
     file: UploadFile = File(...)
 ):
-    """Register a new face in the database"""
     try:
-        # Validate inputs
-        if not name or not email:
-            return {"status": "error", "message": "Name and email required"}
-        
-        # Validate email format
-        import re
-        if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
-            return {"status": "error", "message": "Invalid email format"}
-        
-        # Read and decode image
-        img_bytes = await file.read()
-        nparr = np.frombuffer(img_bytes, np.uint8)
-        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
-        if image is None:
-            return {"status": "error", "message": "Invalid image"}
-        
-        # Check if face is present
-        faces = detect_faces(image)
-        if len(faces) == 0:
-            return {"status": "error", "message": "No face detected in image. Please upload a clear face photo."}
-        
-        # Extract face embedding
-        face_embedding, success = extract_face_embedding(image)
-        
-        if not success or face_embedding is None:
-            return {"status": "error", "message": "Could not extract face features. Please try another image."}
-        
-        # Load existing database
-        if os.path.exists(DB_FILE):
-            with open(DB_FILE, "rb") as f:
-                db = pickle.load(f)
-        else:
-            db = []
-        
-        # Check for duplicate name
-        for person in db:
-            if person["name"].lower() == name.lower():
-                return {"status": "error", "message": f"User '{name}' already exists"}
-        
-        # Save to database
-        db.append({
-            "name": name,
-            "email": email,
-            "features": face_embedding,
-            "registered_at": datetime.now().isoformat()
-        })
-        
-        with open(DB_FILE, "wb") as f:
-            pickle.dump(db, f)
-        
-        return {
-            "status": "success",
-            "message": f"✅ {name} registered successfully!",
-            "total_users": len(db)
-        }
-    
-    except Exception as e:
-        print(f"Registration error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/recognize/")
-async def recognize(file: UploadFile = File(...)):
-    """Recognize a face from uploaded image"""
-    global last_email_time
-    
-    try:
-        # Load database
-        if not os.path.exists(DB_FILE):
-            return {"status": "no_db", "faces": [], "message": "No registered faces"}
-        
-        with open(DB_FILE, "rb") as f:
-            db = pickle.load(f)
-        
-        if len(db) == 0:
-            return {"status": "no_db", "faces": [], "message": "Database is empty"}
+        logger.info(f"Registering user: {name}")
         
         # Read image
-        img_bytes = await file.read()
-        nparr = np.frombuffer(img_bytes, np.uint8)
+        contents = await file.read()
+        nparr = np.frombuffer(contents, np.uint8)
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
         if image is None:
-            return {"status": "error", "message": "Invalid image", "faces": []}
+            return JSONResponse(status_code=400, content={"message": "Invalid image file"})
+        
+        # Convert to RGB for face_recognition
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        
+        # Get face encodings
+        face_locations = face_recognition.face_locations(rgb_image)
+        face_encodings = face_recognition.face_encodings(rgb_image, face_locations)
+        
+        if not face_encodings:
+            return JSONResponse(status_code=400, content={"message": "No face detected in the image! Please upload a clear face photo."})
+        
+        # Convert numpy array to list for storage
+        new_encoding = face_encodings[0].tolist()
+        
+        # Load existing data
+        known_encodings = []
+        known_names = []
+        known_emails = []
+        
+        if ENCODINGS_FILE.exists():
+            try:
+                with open(ENCODINGS_FILE, "rb") as f:
+                    data = pickle.load(f)
+                    if isinstance(data, dict):
+                        known_encodings = data.get("encodings", [])
+                        known_names = data.get("names", [])
+                        known_emails = data.get("emails", [])
+                    else:
+                        known_encodings, known_names, known_emails = data
+            except Exception as e:
+                logger.error(f"Error loading: {e}")
+        
+        # Check if name exists
+        if name in known_names:
+            idx = known_names.index(name)
+            known_encodings[idx] = new_encoding
+            known_emails[idx] = email
+            logger.info(f"Updated existing user: {name}")
+            message = f"✅ {name}'s face updated successfully!"
+        else:
+            known_encodings.append(new_encoding)
+            known_names.append(name)
+            known_emails.append(email)
+            logger.info(f"Added new user: {name}")
+            message = f"✅ {name} registered successfully!"
+        
+        # Save data
+        data = {
+            "encodings": known_encodings,
+            "names": known_names,
+            "emails": known_emails
+        }
+        with open(ENCODINGS_FILE, "wb") as f:
+            pickle.dump(data, f)
+        
+        return {"message": message}
+        
+    except Exception as e:
+        logger.error(f"Register error: {str(e)}")
+        return JSONResponse(status_code=500, content={"message": f"Error: {str(e)}"})
+
+@app.post("/recognize/")
+async def recognize_face(file: UploadFile = File(...)):
+    try:
+        # Read image
+        contents = await file.read()
+        nparr = np.frombuffer(contents, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if image is None:
+            return {"faces": [], "message": "Invalid image"}
+        
+        # Convert to RGB
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        
+        # Load known faces
+        known_encodings = []
+        known_names = []
+        known_emails = []
+        
+        if ENCODINGS_FILE.exists():
+            with open(ENCODINGS_FILE, "rb") as f:
+                data = pickle.load(f)
+                if isinstance(data, dict):
+                    known_encodings = data.get("encodings", [])
+                    known_names = data.get("names", [])
+                    known_emails = data.get("emails", [])
+                else:
+                    known_encodings, known_names, known_emails = data
+        
+        # Convert stored lists back to numpy arrays
+        known_encodings_np = []
+        for enc in known_encodings:
+            if isinstance(enc, list):
+                known_encodings_np.append(np.array(enc))
+            else:
+                known_encodings_np.append(enc)
         
         # Detect faces
-        faces = detect_faces(image)
+        face_locations = face_recognition.face_locations(rgb_image)
+        face_encodings = face_recognition.face_encodings(rgb_image, face_locations)
         
-        if len(faces) == 0:
-            return {"status": "no_face", "faces": [], "message": "No face detected"}
+        # Case 1: No face detected
+        if not face_encodings:
+            logger.info("📭 No face detected in frame")
+            return {"faces": [], "message": "No face detected", "unknown": False}
         
-        # Extract face embedding
-        face_embedding, success = extract_face_embedding(image)
+        face_names = []
+        unknown_detected = False
         
-        if not success or face_embedding is None:
-            return {"status": "error", "message": "Could not extract face features", "faces": []}
-        
-        # Match against database
-        best_match = "Unknown"
-        best_distance = float("inf")
-        best_confidence = 0
-        
-        for person in db:
-            # Calculate Euclidean distance
-            distance = np.linalg.norm(face_embedding - person["features"])
-            confidence = max(0, 1 - (distance / 1.5))  # Convert to confidence score
+        # Match each detected face
+        for face_encoding in face_encodings:
+            if len(known_encodings_np) == 0:
+                # No registered users at all
+                name = "Unknown"
+                unknown_detected = True
+            else:
+                # Calculate distances to all known faces
+                distances = face_recognition.face_distance(known_encodings_np, face_encoding)
+                best_index = np.argmin(distances)
+                best_distance = float(distances[best_index])
+                
+                # Threshold for matching (0.5 is good balance)
+                if best_distance < 0.5:
+                    name = known_names[best_index]
+                    logger.info(f"✅ Recognized: {name} (confidence: {1-best_distance:.1%})")
+                else:
+                    name = "Unknown"
+                    unknown_detected = True
+                    logger.info(f"❌ Unknown face detected (best match: {best_distance:.3f})")
             
-            if distance < best_distance:
-                best_distance = distance
-                best_match = person["name"]
-                best_confidence = confidence
+            face_names.append(name)
         
-        # Apply threshold
-        if best_confidence < THRESHOLD:
-            best_match = "Unknown"
-            
-            # Save intruder image
+        # Case 2: Unknown/Intruder detected - Save image and send email
+        if unknown_detected:
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            intruder_path = os.path.join(INTRUDER_DIR, f"intruder_{timestamp}.jpg")
-            cv2.imwrite(intruder_path, image)
+            filename = f"intruder_{timestamp}.jpg"
+            filepath = INTRUDER_DIR / filename
             
-            # Send email alert (with cooldown)
-            current_time = time.time()
-            if current_time - last_email_time > EMAIL_COOLDOWN:
-                admin_email = os.getenv("ADMIN_EMAIL")
-                if admin_email:
-                    send_email_alert(admin_email, intruder_path)
-                last_email_time = current_time
+            # Save the intruder image
+            cv2.imwrite(str(filepath), image)
+            logger.info(f"📸 Intruder image saved: {filename}")
+            
+            # Log to security log
+            try:
+                with open(LOG_FILE, "a") as f:
+                    f.write(f"[{timestamp}] 🚨 INTRUDER DETECTED - Faces: {', '.join(face_names)} - Image: {filename}\n")
+                logger.info(f"📝 Security log updated")
+            except Exception as e:
+                logger.error(f"Log error: {e}")
+            
+            # Send email alert to admin
+            logger.info(f"📧 Sending intruder alert to admin: {ADMIN_EMAIL}")
+            send_intruder_alert(str(filepath), face_names)
             
             return {
-                "status": "ok",
-                "faces": ["Unknown"],
-                "confidence": float(best_confidence),
-                "num_faces_detected": len(faces),
-                "message": "🚨 Intruder detected!"
+                "faces": face_names,
+                "count": len(face_names),
+                "unknown": True,
+                "message": "🚨 INTRUDER ALERT! Unknown person detected."
             }
+        
+        # Case 3: Registered person detected - NO image saved, NO email
         else:
+            logger.info(f"✅ Registered person(s) detected: {', '.join(face_names)} - No action taken")
             return {
-                "status": "ok",
-                "faces": [best_match],
-                "confidence": float(best_confidence),
-                "num_faces_detected": len(faces),
-                "message": f"✅ Welcome {best_match}!"
-            }
-    
-    except Exception as e:
-        print(f"Recognition error: {e}")
-        return {"status": "error", "message": str(e), "faces": []}
-
-@app.get("/stats/")
-async def get_stats():
-    """Get database statistics"""
-    try:
-        intruder_count = len([f for f in os.listdir(INTRUDER_DIR) if f.endswith('.jpg')]) if os.path.exists(INTRUDER_DIR) else 0
-        
-        if not os.path.exists(DB_FILE):
-            return {
-                "total_registered": 0, 
-                "intruders": intruder_count,
-                "registered_users": []
+                "faces": face_names,
+                "count": len(face_names),
+                "unknown": False,
+                "message": f"✅ Welcome {', '.join(face_names)}!"
             }
         
-        with open(DB_FILE, "rb") as f:
-            db = pickle.load(f)
-        
-        return {
-            "total_registered": len(db),
-            "intruders": intruder_count,
-            "registered_users": [{"name": p["name"], "email": p["email"]} for p in db]
-        }
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        logger.error(f"Recognize error: {str(e)}")
+        return {"faces": [], "error": str(e), "unknown": False}
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
     return {
         "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "database_exists": os.path.exists(DB_FILE)
+        "encodings_exists": ENCODINGS_FILE.exists(),
+        "frontend_exists": FRONTEND_DIR.exists(),
+        "admin_email_configured": bool(ADMIN_EMAIL),
+        "admin_email": ADMIN_EMAIL if ADMIN_EMAIL else "Not configured",
+        "timestamp": datetime.now().isoformat()
     }
+
+@app.get("/admin-status")
+async def admin_status():
+    """Check if admin email is configured"""
+    if ADMIN_EMAIL:
+        return {"configured": True, "email": ADMIN_EMAIL}
+    else:
+        return {"configured": False, "message": "Admin email not configured in .env file"}
+
+@app.get("/users")
+async def get_users():
+    """Get list of all registered users"""
+    if not ENCODINGS_FILE.exists():
+        return {"users": [], "count": 0}
+    try:
+        with open(ENCODINGS_FILE, "rb") as f:
+            data = pickle.load(f)
+        
+        if isinstance(data, dict):
+            users = [{"name": name, "email": email} for name, email in zip(data.get("names", []), data.get("emails", []))]
+        else:
+            users = [{"name": name, "email": email} for name, email in zip(data[0], data[1])]
+        
+        return {"users": users, "count": len(users)}
+    except Exception as e:
+        return {"users": [], "error": str(e), "count": 0}
+
+@app.delete("/clear-intruders")
+async def clear_intruders(secret_key: str):
+    """Clear all intruder images (admin only)"""
+    SECRET_KEY = os.getenv("ADMIN_SECRET_KEY", "admin123")
+    
+    if secret_key != SECRET_KEY:
+        return JSONResponse(status_code=403, content={"message": "Unauthorized"})
+    
+    try:
+        # Delete all files in intruder directory
+        for file in INTRUDER_DIR.glob("*.jpg"):
+            file.unlink()
+        return {"message": f"Cleared {len(list(INTRUDER_DIR.glob('*.jpg')))} intruder images"}
+    except Exception as e:
+        return {"error": str(e)}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8000)

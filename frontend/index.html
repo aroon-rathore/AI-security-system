@@ -13,21 +13,21 @@
     <h1>🔐 AI-Based Security System</h1>
 
     <!-- ========================= -->
-    <!-- SYSTEM STATUS -->
+    <!-- DEBUG CONSOLE -->
     <!-- ========================= -->
     <div class="card">
         <h3>System Status</h3>
-        <p id="debug">Initializing...</p>
+        <p id="debug">Waiting...</p>
     </div>
 
     <!-- ========================= -->
-    <!-- REGISTER -->
+    <!-- REGISTER SECTION -->
     <!-- ========================= -->
     <div class="card">
         <h2>Register Face</h2>
 
-        <input type="text" id="name" placeholder="Enter name">
-        <input type="email" id="email" placeholder="Enter email">
+        <input type="text" id="name" placeholder="Enter name" required>
+        <input type="email" id="email" placeholder="Enter email" required>
         <input type="file" id="image" accept="image/*">
 
         <button onclick="register()">Register</button>
@@ -36,7 +36,7 @@
     </div>
 
     <!-- ========================= -->
-    <!-- CAMERA -->
+    <!-- CAMERA SECTION -->
     <!-- ========================= -->
     <div class="card">
         <h2>Live Camera</h2>
@@ -46,14 +46,28 @@
         <video id="video" autoplay playsinline></video>
         <canvas id="canvas" style="display:none;"></canvas>
 
-        <p id="status">Camera inactive</p>
-        <h3 id="faceResult">Waiting...</h3>
+        <p id="status"></p>
+        <h3 id="faceResult">Waiting for face...</h3>
     </div>
 
     <!-- ========================= -->
     <!-- SCRIPT -->
     <!-- ========================= -->
     <script src="script.js"></script>
+
+    <!-- ========================= -->
+    <!-- DEBUG SCRIPT -->
+    <!-- ========================= -->
+    <script>
+        // simple system check
+        fetch("http://127.0.0.1:8000/docs")
+            .then(() => {
+                document.getElementById("debug").innerText = "Backend Connected ✅";
+            })
+            .catch(() => {
+                document.getElementById("debug").innerText = "Backend NOT Connected ❌";
+            });
+    </script>
 
 </body>
 </html>
